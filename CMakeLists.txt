@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.5)
+project(lun_sapp)
+
+set(CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
+#include(Version)
+
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set (CMAKE_CXX_FLAGS "-Wall")
+SET(CMAKE_BUILD_TYPE Debug)
+
+add_definitions(-D_GNU_SOURCE)
+
+if (CMAKE_BUILD_TYPE STREQUAL Debug) 
+    add_definitions(-DDEBUG)
+endif()
+
+add_subdirectory(vendor)
+add_subdirectory(test)
