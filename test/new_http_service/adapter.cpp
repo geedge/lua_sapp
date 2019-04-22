@@ -11,7 +11,7 @@
 //错误处理，日志, 工程化，日志完备
 
 static void* g_logger = NULL;
-static std::vector<std::vector<lua_plug>> g_lua_plugs(LUA_ENTRY_TYPE_NUM, std::vector<lua_plug>());
+static std::vector<std::vector<lua_State*>> g_http_lua_states;
 
 static void lua_traceback(const char *func_name, lua_State *lua_state, int ret){
 	int n = lua_gettop(lua_state);
@@ -224,50 +224,40 @@ static int get_http_response_body(lua_State* lua_state){
 }
 
 
-static int load_lua_plug(const char *profile){
-	std::unordered_map<std::string, int> type_map = {
-		{"ip", LUA_ENTRY_TYPE_IP},
-		{"tcp", LUA_ENTRY_TYPE_TCP},
-		{"udp", LUA_ENTRY_TYPE_UDP},
-		{"http", LUA_ENTRY_TYPE_HTTP},
-		{"tls", LUA_ENTRY_TYPE_TLS},
-		{"dns", LUA_ENTRY_TYPE_DNS},
-		{"mail", LUA_ENTRY_TYPE_MAIL},
-		{"ftp", LUA_ENTRY_TYPE_FTP}
-	}; 
+static int load_lua_http_plug(const char *profile, int thread_num){
 	const char *section = "main";
 	char file_path[LUA_SAPP_PATH_MAX] = "";
 	char entry_type[LUA_SAPP_SYMBOL_MAX] = "";
 	MESA_load_profile_string_def(profile, section, "file_path", file_path, sizeof(file_path), "");
-	MESA_load_profile_string_def(profile, section, "entry_type", entry_type, sizeof(entry_type), "http");
-	
-	lua_State *lua_state = luaL_newstate();
-	if(lua_state == NULL){
-		printf("failed to LuaL_newstate\n");
-		return -1;
+	MESA_load_profile_string_def(profile, section, "entry_type", entry_type, sizeof(entry_type), "");
+	printf("MESA_prof_load: profile is %s, section is %s, file_path is %s, entry_type is %s\n",
+				 profile, section, file_path, entry_type);
+	if(strncmp(entry_type, "http", LUA_SAPP_SYMBOL_MAX) == 0){
+		for(int i = 0; i < thread_num; i++){
+			lua_State *lua_state = luaL_newstate();
+			if(lua_state == NULL){
+				printf("failed to LuaL_newstate\n");
+				return -1;
+			}
+			luaL_openlibs(lua_state);
+			int ret = luaL_dofile(lua_state, file_path);
+			if(ret){
+				//log error
+				printf("error: ret is %d, file_path is %s\n", ret, file_path);
+				return -1;
+			}
+			lua_register(lua_state, "get_stream_info", get_stream_info);
+			lua_register(lua_state, "get_http_request_header", get_http_request_header);
+			lua_register(lua_state, "get_http_response_header", get_http_response_header);
+			lua_register(lua_state, "get_http_request_body", get_http_request_body);
+			lua_register(lua_state, "get_http_response_body", get_http_response_body);
+			g_http_lua_states[i].push_back(lua_state);
+		}
 	}
-    luaL_openlibs(lua_state);
-    int ret = luaL_dofile(lua_state, file_path);
-	if(ret){
-		//log error
-		printf("error: ret is %d, file_path is %s\n", ret, file_path);
-		return -1;
-	}
-	//TODO: what if not register, rusume handle error
-	lua_register(lua_state, "get_stream_info", get_stream_info);
-    lua_register(lua_state, "get_http_request_header", get_http_request_header);
-	lua_register(lua_state, "get_http_response_header", get_http_response_header);
-	lua_register(lua_state, "get_http_request_body", get_http_request_body);
-	lua_register(lua_state, "get_http_response_body", get_http_response_body);
-	lua_plug plug;
-	plug.file_path = std::string(file_path);
-	plug.entry_type = (enum lua_entry_type)type_map[std::string(entry_type)];
-	plug.lua_state = lua_state;
-	g_lua_plugs[plug.entry_type].push_back(plug);
 	return 0;
 }
 
-static int process_lua_plug_conflist(const char* filename)
+static int process_lua_plug_conflist(const char* filename, int thread_num)
 {
 	char lua_plug_conf_path[LUA_SAPP_PATH_MAX] = {0};
 	FILE* fp = fopen(filename, "r");
@@ -286,7 +276,7 @@ static int process_lua_plug_conflist(const char* filename)
 		}
 		int len = strnlen(lua_plug_conf_path, LUA_SAPP_PATH_MAX);
 		lua_plug_conf_path[len - 1] = '\0';
-		int ret = load_lua_plug(lua_plug_conf_path);
+		int ret = load_lua_http_plug(lua_plug_conf_path, thread_num);
 		if(ret < 0){
 			printf("failed to load_lua_plug: conf_path is %s\n", lua_plug_conf_path);
 		}
@@ -296,16 +286,15 @@ static int process_lua_plug_conflist(const char* filename)
 	return 0;
 }
 
-static http_sess_ctx* init_http_sess_ctx(){
+static http_sess_ctx* init_http_sess_ctx(int thread_seq){
     http_sess_ctx *ctx = new http_sess_ctx();
-	for(lua_plug plug : g_lua_plugs[LUA_ENTRY_TYPE_HTTP]){
-		lua_State* lua_state = plug.lua_state;
+	for(lua_State *lua_state : g_http_lua_states[thread_seq]){
 		lua_State* coroutine = lua_newthread(lua_state);
-        int ret = lua_checkstack(lua_state, 1);
+		int ret = lua_checkstack(lua_state, 1);
         if(ret != 1){
 			//do log
             printf("do not have enough space, ret is %d\n", ret);
-			break;
+			continue;
 		}
 		ctx->coroutines.push_back(coroutine);
 	}
@@ -325,6 +314,7 @@ std::string utils_inet_ntoa(uint32_t ip)
 }
 
 uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thread_seq, struct streaminfo *a_tcp, void *a_packet){	
+	//printf("thread_seq is %d\n", thread_seq);
 	uchar ret = PROT_STATE_GIVEME;
 	http_sess_ctx *ctx = (http_sess_ctx*)*param;	
 	http_infor *a_http = (http_infor *)(session_info->app_info);
@@ -333,7 +323,7 @@ uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thre
 		return PROT_STATE_DROPME;
 	}
 	if(ctx == nullptr){
-		ctx = init_http_sess_ctx();
+		ctx = init_http_sess_ctx(thread_seq);
 		*param = ctx;
 		stream_begin = true;
 	}	
@@ -447,27 +437,35 @@ uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thre
 	return ret;
 }
 
-int NEW_HTTP_SERVICE_INIT(void)
-{
+int NEW_HTTP_SERVICE_INIT(void){
+	/*
 	g_logger = MESA_create_runtime_log_handle("./log/http/http_service", 10);
 	if(g_logger == NULL){		
 		printf("%s init : get log handle error!\n", HTTP_SERVICE_PLUGNAME);
 		return -1;
 	} 
+	*/
+	int thread_num = 1;
+	const char *profile = "./conf/main.conf";
+	const char *section = "Module";
+	MESA_load_profile_int_def(profile, section, "threadnum", (int*)&thread_num, 0);
+	printf("MESA_prof_load: profile is %s, section is %s, thread_num is %d\n", profile, section, thread_num);	
+	for(int i = 0; i < thread_num; i++){
+		g_http_lua_states.push_back(std::vector<lua_State*>());
+	}
 
 	// get all business lua script which register http
 	const char *conflist_path = "./plug/lua/conflist_lua.inf";
-	if(g_lua_plugs[LUA_ENTRY_TYPE_HTTP].size() == 0){
-		process_lua_plug_conflist(conflist_path);
-	}
+	process_lua_plug_conflist(conflist_path, thread_num);
 	return 0;
 }
 
-void NEW_HTTP_SERVICE_DESTROY(void)
-{
-	for(auto plug : g_lua_plugs[LUA_ENTRY_TYPE_HTTP]){
-		lua_close(plug.lua_state);
+void NEW_HTTP_SERVICE_DESTROY(void){
+	for(auto states : g_http_lua_states){
+		for(auto state : states){
+			lua_close(state);
+		}
 	}
-    return ;
+    return;
 }
 

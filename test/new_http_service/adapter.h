@@ -97,13 +97,6 @@ public:
     std::vector<lua_State*> coroutines;
 };
 
-class lua_plug{
-public:
-	std::string file_path;
-	enum lua_entry_type entry_type;
-	lua_State *lua_state;
-};
-
 #ifdef __cplusplus
 extern "C" {
 #endif
