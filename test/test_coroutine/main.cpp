@@ -1,6 +1,9 @@
 #include <iostream>
+#include <cstring>
 #include <stdio.h>
+#include <stdlib.h>
 #include <vector>
+#include <unordered_set>
 #include <unistd.h>
 using namespace std;
 extern "C" {
@@ -9,9 +12,50 @@ extern "C" {
     #include "lauxlib.h"
 }
 
-static void output_stack_size(lua_State *L){
+static void output_stack_size(lua_State *L, int line){
     int n = lua_gettop(L);
-    cout<<"stack size is "<<n<<endl;
+    printf("line %d: stack size is %d\n", line, n);
+    for(int i = -1; i >= 0 - n; i--){
+        string type = string(lua_typename(L, lua_type(L, i)));
+        string value = "unknown";
+        if(type == "string"){
+            value = lua_tostring(L, i);
+        }
+        printf("index is %d, type is %s, value is %s\n", i, type.c_str(), value.c_str());
+    }
+}
+
+
+static void lua_traceback(const char *func_name, lua_State *L){
+	int n = lua_gettop(L);
+	printf("%s error: stack size is %d, traceback is:\n", func_name, n);
+	for(int i = -1; i >= 0 - n; i--){
+        string type = string(lua_typename(L, lua_type(L, i)));
+        if(type == "string"){
+			printf("%s\n", lua_tostring(L, i));
+		}
+    }
+	lua_pop(L, n);
+}
+
+//copy from suricata
+static int lua_push_string_buffer(lua_State *lua_state, const char *input, size_t input_len)
+{
+    if (input_len % 4 != 0) {
+        /* we're using a buffer sized at a multiple of 4 as lua_pushlstring generates
+         * invalid read errors in valgrind otherwise. Adding in a nul to be sure.
+         * Buffer size = len + 1 (for nul) + whatever makes it a multiple of 4 */
+        size_t buflen = input_len + 1 + ((input_len + 1) % 4);
+        char buf[buflen];
+        memset(buf, 0x00, buflen);
+        memcpy(buf, input, input_len);
+        buf[input_len] = '\0';
+        /* return value through lua_state, as a luastring */
+        lua_pushlstring(lua_state, buf, input_len);
+    } else {
+        lua_pushlstring(lua_state, input, input_len);
+    }
+    return 1;
 }
 
 static void test_coroutine(int argc, char *argv[]){
@@ -58,7 +102,7 @@ static void test_coroutine(int argc, char *argv[]){
 
 static int foo (lua_State *L) {
     cout<<"call foo"<<endl;
-    output_stack_size(L);
+    output_stack_size(L, 84);
     lua_Number sum = 0.0;
     int n = lua_gettop(L);
     for (int i = 1; i <= n; i++) {
@@ -71,10 +115,10 @@ static int foo (lua_State *L) {
     }
     printf("sum is %f\n", sum);
     lua_pop(L, n);
-    output_stack_size(L);
+    output_stack_size(L, 97);
     lua_pushnumber(L, sum/n);        //first result 
     lua_pushnumber(L, sum);         //second result
-    output_stack_size(L);
+    output_stack_size(L, 100);
     return 2;                   //number of results
 }
 
@@ -83,8 +127,41 @@ static int foo2(lua_State *L, int n, long int m){
     return 0;
 }
 
-static int foo1(lua_State *L){
+int flag = 0;
+
+static int _foo1(lua_State *L, int status, lua_KContext yieldk_ctx){
+    printf("call foo1\n");
+    output_stack_size(L, 121);
+    /*
+    unordered_set<string> regions; 
     output_stack_size(L);
+    lua_pushnil(L);
+    while(lua_next(L, -2) != 0){
+        printf("%s - %s\n", lua_typename(L, lua_type(L, -2)), lua_typename(L, lua_type(L, -1)));
+        regions.insert(string(lua_tostring(L, -1)));
+        lua_pop(L, 1);
+    }
+    for(auto region : regions)
+        cout<<region<<endl;
+    output_stack_size(L);
+    */
+    //lua_pop(L, 1);
+    if(flag == 1){
+        lua_newtable(L);
+        lua_push_string_buffer(L, "name", 4);
+        lua_newtable(L);
+        lua_push_string_buffer(L, "leo", 3);
+        lua_rawseti(L, -2, 1);
+        lua_push_string_buffer(L, "cui", 3);
+        lua_rawseti(L, -2, 2);
+        lua_settable(L, -3);
+        return 1;
+    }
+    lua_yieldk(L, 0, 0, _foo1);
+}
+
+static int foo1(lua_State *L){
+    return _foo1(L, 0, 0);
     /*
     lua_getglobal(L, "g_http_sess_ctx");
     output_stack_size(L);
@@ -102,7 +179,8 @@ static void test_lua_CFunction(){
     const char *filename = "../../test/test_coroutine/test.lua";
     lua_State *L = luaL_newstate();
     luaL_openlibs(L);
-    luaL_dofile(L, filename);
+    int ret = luaL_dofile(L, filename);
+    printf("luaL_dofile, ret is %d\n", ret);
     lua_register(L, "myfoo", foo1);
     lua_getglobal(L, "lua_call_c");
     /*
@@ -119,8 +197,24 @@ static void test_lua_CFunction(){
     //lua_pushinteger(L, 2);
     //lua_pushinteger(L, 3);
     */
-    lua_resume(L, NULL, 0);
-    cout<<"cpp: atfer lua_call"<<endl;
+    //output_stack_size(L);
+
+    ret = lua_resume(L, NULL, 0);
+    if(ret != LUA_OK && ret != LUA_YIELD){
+        lua_traceback("lua_resume", L);
+        return;
+    }
+    printf("lua resume: ret is %d\n", ret);
+    //output_stack_size(L, 190);
+    //flag = 1;
+
+    ret = lua_resume(L, NULL, 0);
+    printf("lua resume: ret is %d\n", ret);
+    output_stack_size(L, 194);
+
+
+    //printf("lua_resume: ret is %d\n", ret);
+    //cout<<"cpp: atfer lua_call"<<endl;
     //lua_resume(L, NULL, 0);
 }
 

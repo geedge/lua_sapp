@@ -1,37 +1,35 @@
 #include "adapter.h"
 
-#define LOG_MODULE_NAME "SAPP_LUA"
-#define LUA_SAPP_SYMBOL_MAX 64
-#define LUA_SAPP_PATH_MAX 256
-#define LUA_SAPP_STRING_MAX 2048
-#define LUA_ENTRY_TYPE_NUM 8
-enum lua_entry_type{
-	LUA_ENTRY_TYPE_IP = 0,
-	LUA_ENTRY_TYPE_TCP,
-	LUA_ENTRY_TYPE_UDP,
-	LUA_ENTRY_TYPE_HTTP, 
-	LUA_ENTRY_TYPE_TLS,
-	LUA_ENTRY_TYPE_DNS,
-	LUA_ENTRY_TYPE_MAIL,
-	LUA_ENTRY_TYPE_FTP,
-};
-
-
 //TODO:
-// other_regions 有多个, 怎么处理
-// 增加根据region返回header功能
-
-class lua_plug{
-public:
-	std::string file_path;
-	enum lua_entry_type entry_type;
-	int dir; 
-	std::unordered_set<std::string> regions;
-	lua_State *lua_state;
-};
+//每个函数都要判断返回值 done
+// lua错误处理，比如函数没有注册，resume的返回值判断然后打印错误, 不再resume该协程  done
+//压栈之前要check_stack  done
+//流结束clear_ctx之外还要释放该协程，自动垃圾回收？做实验验证一下  done 
+//destroy，释放lua_state  done
+//多线程 m * n个虚拟机
+//dumpfile改成在线试一下
+//错误处理，日志, 工程化，日志完备
 
 static void* g_logger = NULL;
 static std::vector<std::vector<lua_plug>> g_lua_plugs(LUA_ENTRY_TYPE_NUM, std::vector<lua_plug>());
+
+static void lua_traceback(const char *func_name, lua_State *lua_state, int ret){
+	int n = lua_gettop(lua_state);
+	printf("%s error: ret is %d, traceback is:\n", func_name, ret);
+	for(int i = -1; i >= 0 - n; i--){
+        std::string type = std::string(lua_typename(lua_state, lua_type(lua_state, i)));
+        if(type == "string"){
+			printf("%s\n", lua_tostring(lua_state, i));
+		}
+    }
+	lua_pop(lua_state, n);
+}
+
+std::string _inet_ntoa(uint32_t ip)
+{
+	 const char *_ip = inet_ntoa(*(struct in_addr *)&ip);
+	 return std::string(_ip);
+}
 
 //copy from suricata
 static int lua_push_string_buffer(lua_State *lua_state, const char *input, size_t input_len)
@@ -53,47 +51,178 @@ static int lua_push_string_buffer(lua_State *lua_state, const char *input, size_
     return 1;
 }
 
-
-static int _get_http_headers(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
+static int get_stream_tuple5(lua_State *lua_state){
 	lua_getglobal(lua_state, "cur_http_sess_ctx");
     http_sess_ctx *sess_ctx = (http_sess_ctx *)lua_touserdata(lua_state, -1);
-	lua_getglobal(lua_state, "cur_http_sess_dir");
-	int curdir = (int)lua_tonumber(lua_state, -1);
-	lua_pop(lua_state, 2);
+	lua_pop(lua_state, 1);
 	if(sess_ctx == NULL){
 		//do log
 		std::cout<<"sess_ctx is null"<<std::endl; 
+		return -1;
+	}
+	stream_tuple5& tuple5 = sess_ctx->tuple5;
+	if(tuple5.parse_done == true){
+		lua_newtable(lua_state);
+		lua_push_string_buffer(lua_state, "ip_version", std::string("ip_version").length());
+		lua_push_string_buffer(lua_state, tuple5.ip_version.c_str(), tuple5.ip_version.length());
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "stream_type", std::string("stream_type").length());
+		lua_push_string_buffer(lua_state, tuple5.stream_type.c_str(), tuple5.stream_type.length());
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "sip", std::string("sip").length());
+		lua_push_string_buffer(lua_state, tuple5.sip.c_str(), tuple5.sip.length());
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "dip", std::string("dip").length());
+		lua_push_string_buffer(lua_state, tuple5.dip.c_str(), tuple5.dip.length());
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "sport", std::string("sport").length());
+		lua_pushinteger(lua_state, tuple5.sport);
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "dport", std::string("dport").length());
+		lua_pushinteger(lua_state, tuple5.dport);
+		lua_settable(lua_state, -3);
 		return 0;
 	}
-	lua_newtable(lua_state);
-    for(auto header : curdir == DIR_C2S ? sess_ctx->request_headers : sess_ctx->response_headers){
-		lua_push_string_buffer(lua_state, header.first.c_str(), header.first.length() + 1);
-		lua_push_string_buffer(lua_state, header.second.c_str(), header.second.length() + 1);
-		lua_settable(lua_state, -3);
+	return -1;
+}
+
+static int _get_stream_info(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
+	int ret = get_stream_tuple5(lua_state);
+	if(ret < 0){
+		lua_yieldk(lua_state, 0, 0, _get_stream_info);
 	}
-	//return 1 means one return value
 	return 1;
 }
 
-static int get_http_headers(lua_State *lua_state){
-	lua_yieldk(lua_state, 0, 0, _get_http_headers);
-	return 1;
+static int get_stream_info(lua_State* lua_state){
+	//printf("call get_strem_info\n");
+	return _get_stream_info(lua_state, 0, 0);
 }
 
-int regions_parse(char *str, std::unordered_set<std::string>& regions){
-	char *token;
-	char *rest = str;
-	while((token = strtok_r(rest, ",", &rest))){
-		std::string _token = std::string(token);
-		if(_token == "all"){
-			regions.clear();
-			regions.insert(_token);
-			return 0;
+static int get_http_header(lua_State *lua_state, int type){
+	lua_getglobal(lua_state, "cur_http_sess_ctx");
+    http_sess_ctx *sess_ctx = (http_sess_ctx *)lua_touserdata(lua_state, -1);
+	lua_pop(lua_state, 1);
+	if(sess_ctx == NULL){
+		//do log
+		std::cout<<"sess_ctx is null"<<std::endl; 
+		return -1;
+	}
+	std::unordered_set<std::string> required_regions; 
+    lua_pushnil(lua_state);
+    while(lua_next(lua_state, -2) != 0){
+        required_regions.insert(std::string(lua_tostring(lua_state, -1)));
+        lua_pop(lua_state, 1);
+	}
+	http_header& header = (type == HTTP_TYPE_REQUEST ? sess_ctx->req_header : sess_ctx->resp_header);
+	if(header.parse_done == true){
+		//printf("header parse done\n");
+		lua_newtable(lua_state);
+		for(auto region : header.std_regions){
+			if(required_regions.find("ALL") != required_regions.end() || required_regions.find(region.first) != required_regions.end()){
+				lua_push_string_buffer(lua_state, region.first.c_str(), region.first.length());
+				lua_push_string_buffer(lua_state, region.second.c_str(), region.second.length());
+				lua_settable(lua_state, -3);
+			}
 		}
-		regions.insert(_token);
+		if(!header.other_regions.empty()){
+			if(required_regions.find("ALL") != required_regions.end() || required_regions.find("HTTP_OTHER_REGIONS") != required_regions.end()){
+				lua_push_string_buffer(lua_state, "HTTP_OTHER_REGIONS", std::string("HTTP_OTHER_REGIONS").length());
+				lua_newtable(lua_state);
+				int i = 1;
+				for(auto region : header.other_regions){
+					lua_push_string_buffer(lua_state, region.c_str(), region.length());
+					lua_rawseti(lua_state, -2, i++);
+				}
+				lua_settable(lua_state, -3);
+			}
+		}
+		return 0;
 	}
-	return 0;
+	return -1;
 }
+
+static int _get_http_request_header(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
+	//printf("call get_http_request_header\n");
+	int ret = get_http_header(lua_state, HTTP_TYPE_REQUEST);
+	if(ret < 0){
+		lua_yieldk(lua_state, 0, 0, _get_http_request_header);
+	}
+	return 1;
+}
+
+static int get_http_request_header(lua_State* lua_state){
+	return _get_http_request_header(lua_state, 0, 0);
+}
+
+static int _get_http_response_header(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
+	int ret = get_http_header(lua_state, HTTP_TYPE_RESPONSE);
+	if(ret < 0){
+		lua_yieldk(lua_state, 0, 0, _get_http_response_header);
+	}
+	return 1;
+}
+
+static int get_http_response_header(lua_State* lua_state){
+	return _get_http_response_header(lua_state, 0, 0);
+}
+
+static int get_http_body(lua_State *lua_state, int type){
+	//printf("call _get_http_response_body\n");
+	lua_getglobal(lua_state, "cur_http_sess_ctx");
+    http_sess_ctx *sess_ctx = (http_sess_ctx *)lua_touserdata(lua_state, -1);
+	lua_pop(lua_state, 1);
+	if(sess_ctx == NULL){
+		//do log
+		std::cout<<"sess_ctx is null"<<std::endl; 
+		return -1;
+	}
+	http_body& body = (type ==  HTTP_TYPE_REQUEST? sess_ctx->req_body : sess_ctx->resp_body);
+	if(body.data_end == true || body.buf != nullptr){
+		lua_newtable(lua_state);
+		lua_push_string_buffer(lua_state, "block_id", std::string("block_id").length());
+		lua_pushinteger(lua_state, body.block_id);
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "data_end", std::string("data_end").length());
+		lua_pushboolean(lua_state, body.data_end);
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "buf", std::string("buf").length());
+		lua_pushlightuserdata(lua_state, body.buf);
+		lua_settable(lua_state, -3);
+		lua_push_string_buffer(lua_state, "buflen", std::string("buflen").length());
+		lua_pushinteger(lua_state, body.buflen);
+		lua_settable(lua_state, -3);
+		body.buf = nullptr;
+		body.buflen = 0;
+		return 0;
+	}
+	return -1;
+}
+
+static int _get_http_request_body(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
+	int ret = get_http_body(lua_state, HTTP_TYPE_REQUEST);
+	if(ret < 0){
+		lua_yieldk(lua_state, 0, 0, _get_http_request_body);
+	}
+	return 1;
+}
+
+static int get_http_request_body(lua_State* lua_state){
+	return _get_http_request_body(lua_state, 0, 0);
+}
+
+static int _get_http_response_body(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
+	int ret = get_http_body(lua_state, HTTP_TYPE_RESPONSE);
+	if(ret < 0){
+		lua_yieldk(lua_state, 0, 0, _get_http_response_body);
+	}
+	return 1;
+}
+
+static int get_http_response_body(lua_State* lua_state){
+	return _get_http_response_body(lua_state, 0, 0);
+}
+
 
 static int load_lua_plug(const char *profile){
 	std::unordered_map<std::string, int> type_map = {
@@ -105,40 +234,40 @@ static int load_lua_plug(const char *profile){
 		{"dns", LUA_ENTRY_TYPE_DNS},
 		{"mail", LUA_ENTRY_TYPE_MAIL},
 		{"ftp", LUA_ENTRY_TYPE_FTP}
-	};
-	std::unordered_map<std::string, int> dir_map{
-		{"c2s", DIR_C2S},
-		{"s2c", DIR_S2C},
-		{"all", DIR_DOUBLE}
-	};
+	}; 
 	const char *section = "main";
 	char file_path[LUA_SAPP_PATH_MAX] = "";
 	char entry_type[LUA_SAPP_SYMBOL_MAX] = "";
-	char dir[LUA_SAPP_SYMBOL_MAX] = "";
-	char regions[LUA_SAPP_STRING_MAX] = "";
 	MESA_load_profile_string_def(profile, section, "file_path", file_path, sizeof(file_path), "");
 	MESA_load_profile_string_def(profile, section, "entry_type", entry_type, sizeof(entry_type), "http");
-	MESA_load_profile_string_def(profile, section, "dir", dir, sizeof(dir), "all");
-	MESA_load_profile_string_def(profile, section, "regions", regions, sizeof(regions), "all");
 	
 	lua_State *lua_state = luaL_newstate();
+	if(lua_state == NULL){
+		printf("failed to LuaL_newstate\n");
+		return -1;
+	}
     luaL_openlibs(lua_state);
-    luaL_dofile(lua_state, file_path);
-    lua_register(lua_state, "get_http_headers", get_http_headers);
-    lua_getglobal(lua_state, "main");
-
+    int ret = luaL_dofile(lua_state, file_path);
+	if(ret){
+		//log error
+		printf("error: ret is %d, file_path is %s\n", ret, file_path);
+		return -1;
+	}
+	//TODO: what if not register, rusume handle error
+	lua_register(lua_state, "get_stream_info", get_stream_info);
+    lua_register(lua_state, "get_http_request_header", get_http_request_header);
+	lua_register(lua_state, "get_http_response_header", get_http_response_header);
+	lua_register(lua_state, "get_http_request_body", get_http_request_body);
+	lua_register(lua_state, "get_http_response_body", get_http_response_body);
 	lua_plug plug;
 	plug.file_path = std::string(file_path);
 	plug.entry_type = (enum lua_entry_type)type_map[std::string(entry_type)];
-	plug.dir = dir_map[std::string(dir)];
-	regions_parse(regions, plug.regions);
 	plug.lua_state = lua_state;
 	g_lua_plugs[plug.entry_type].push_back(plug);
-    lua_resume(lua_state, NULL, 0);
 	return 0;
 }
 
-int process_lua_plug_conflist(const char* filename)
+static int process_lua_plug_conflist(const char* filename)
 {
 	char lua_plug_conf_path[LUA_SAPP_PATH_MAX] = {0};
 	FILE* fp = fopen(filename, "r");
@@ -157,7 +286,10 @@ int process_lua_plug_conflist(const char* filename)
 		}
 		int len = strnlen(lua_plug_conf_path, LUA_SAPP_PATH_MAX);
 		lua_plug_conf_path[len - 1] = '\0';
-		load_lua_plug(lua_plug_conf_path);
+		int ret = load_lua_plug(lua_plug_conf_path);
+		if(ret < 0){
+			printf("failed to load_lua_plug: conf_path is %s\n", lua_plug_conf_path);
+		}
 	}
 	fclose(fp);
 	fp=NULL;
@@ -166,6 +298,17 @@ int process_lua_plug_conflist(const char* filename)
 
 static http_sess_ctx* init_http_sess_ctx(){
     http_sess_ctx *ctx = new http_sess_ctx();
+	for(lua_plug plug : g_lua_plugs[LUA_ENTRY_TYPE_HTTP]){
+		lua_State* lua_state = plug.lua_state;
+		lua_State* coroutine = lua_newthread(lua_state);
+        int ret = lua_checkstack(lua_state, 1);
+        if(ret != 1){
+			//do log
+            printf("do not have enough space, ret is %d\n", ret);
+			break;
+		}
+		ctx->coroutines.push_back(coroutine);
+	}
 	return ctx;
 }
 
@@ -174,38 +317,41 @@ static void clear_http_sess_ctx(http_sess_ctx *ctx){
     ctx = NULL;
 }
 
-static std::string trans_to_binary(unsigned int n){
-	std::string res;
-	while(n){
-		res = std::to_string(n % 2) + res;
-		n /= 2;
-	}
-	return res;
-}
 
-static void output_stack_size(lua_State *lua_state){
-    int n = lua_gettop(lua_state);
-    std::cout<<"stack size is "<<n<<std::endl;
+std::string utils_inet_ntoa(uint32_t ip)
+{
+	 const char *_ip = inet_ntoa(*(struct in_addr *)&ip);
+	 return std::string(_ip);
 }
 
 uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thread_seq, struct streaminfo *a_tcp, void *a_packet){	
-	uchar rec = PROT_STATE_GIVEME;
+	uchar ret = PROT_STATE_GIVEME;
 	http_sess_ctx *ctx = (http_sess_ctx*)*param;	
 	http_infor *a_http = (http_infor *)(session_info->app_info);
-	//static int		header_len = 0;
-	//static int		content_len = 0;
-	if(NULL==session_info){
+	bool stream_begin = false;
+	if(session_info == nullptr){
 		return PROT_STATE_DROPME;
 	}
-	if(ctx == NULL){
+	if(ctx == nullptr){
 		ctx = init_http_sess_ctx();
 		*param = ctx;
+		stream_begin = true;
 	}	
-	std::string prot_flag_str = trans_to_binary(session_info->prot_flag);
-	//MESA_handle_runtime_log(g_logger, RLOG_LV_INFO, HTTP_SERVICE_PLUGNAME, 
-	//		"call http_service entry, http_state is %02x\n, prot_flag mask is %s : %d", http_state, prot_flag_str.c_str(), prot_flag_str.length() - 1);
-	std::string temp = (a_http->http_state == HTTP_DATA_BEGIN) ? "data begin" : "not data begin";
-	//curdir:  request or response 
+	if(ctx->tuple5.parse_done == false){
+		struct stream_tuple4_v4 *tuple4_v4 = a_tcp->addr.tuple4_v4;
+		ctx->tuple5.ip_version = "IPV4";
+		if(a_tcp->type == STREAM_TYPE_TCP){
+			ctx->tuple5.stream_type = "TCP";
+		}
+		if(a_tcp->type == STREAM_TYPE_UDP){
+			ctx->tuple5.stream_type = "UDP";
+		}
+		ctx->tuple5.sip = utils_inet_ntoa(tuple4_v4->saddr);
+		ctx->tuple5.dip = utils_inet_ntoa(tuple4_v4->daddr);
+		ctx->tuple5.sport = ntohs(tuple4_v4->source);
+		ctx->tuple5.dport = ntohs(tuple4_v4->dest);
+		ctx->tuple5.parse_done = true;
+	}
     uchar curdir = a_http->curdir;
 	switch(session_info->prot_flag)
 	{
@@ -213,38 +359,92 @@ uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thre
 		case HTTP_CONTENT:
 			break;
 		case HTTP_UNGZIP_CONTENT:	
-			//fwrite(session_info->buf, session_info->buflen, 1, service_pme->fp);			
-			//fflush(service_pme->fp);			
+			if(curdir == DIR_C2S){
+				ctx->req_body.block_id++;
+				ctx->req_body.buf = session_info->buf;
+				ctx->req_body.buflen = session_info->buflen;
+			}
+			if(curdir == DIR_S2C){
+				ctx->resp_body.block_id++;
+				ctx->resp_body.buf = session_info->buf;
+				ctx->resp_body.buflen = session_info->buflen;
+			}
 			break;
 		default:
 			std::string key(http_proto_flag2region(session_info->prot_flag));
             std::string value((const char*)(session_info->buf), session_info->buflen);
 			if(curdir == DIR_C2S){
-            	ctx->request_headers.insert({key, value});
+				if(key == "HTTP_OTHER_REGIONS"){
+					ctx->req_header.other_regions.insert(value);
+				}
+				else{
+            		ctx->req_header.std_regions.insert({key, value});
+				}
 			}
 			else{
-				ctx->response_headers.insert({key, value});
+				if(key == "HTTP_OTHER_REGIONS"){
+					ctx->resp_header.other_regions.insert(value);
+				}
+				else{
+					ctx->resp_header.std_regions.insert({key, value});
+				}
 			}
 			break;			
 	}
     uchar http_state = a_http->http_state;
-    //header over, resume lua
+	//printf("curdir is %d, http_state is %d\n", curdir, http_state);
+    //header over
 	if(http_state == HTTP_DATA_BEGIN){
-		for(auto plug : g_lua_plugs[LUA_ENTRY_TYPE_HTTP]){
-			if(plug.dir == DIR_DOUBLE || plug.dir == curdir){
-				lua_pushlightuserdata(plug.lua_state, (void *)ctx);
-    			lua_setglobal(plug.lua_state, "cur_http_sess_ctx");
-				lua_pushinteger(plug.lua_state, curdir);
-				lua_setglobal(plug.lua_state, "cur_http_sess_dir");
-        		lua_resume(plug.lua_state, NULL, 0);
-			}
+		if(curdir == DIR_C2S){
+			ctx->req_header.parse_done = true;
+		}
+		if(curdir == DIR_S2C){
+			ctx->resp_header.parse_done = true;
 		}
     }
+	//data over
+	if(http_state == HTTP_DATA_END){
+		if(curdir == DIR_C2S){
+			ctx->req_body.data_end = true;
+		}
+		if(curdir == DIR_S2C){
+			ctx->resp_body.data_end = true;
+		}
+	}
+	//resume coroutine
+	for(lua_State*& coroutine : ctx->coroutines){
+		if(coroutine == nullptr){
+			continue;
+		}
+		/*
+		int ret = lua_checkstack(coroutine, 1);
+        if(ret != 1){
+			//do log
+            printf("do not have enough space, ret is %d\n", ret);
+			continue;
+		}
+		*/
+		lua_pushlightuserdata(coroutine, (void *)ctx);
+		lua_setglobal(coroutine, "cur_http_sess_ctx");
+		if(stream_begin){
+			lua_getglobal(coroutine, "process");
+		}
+		ret = lua_resume(coroutine, NULL, 0);
+		if(ret == LUA_OK){
+			coroutine = nullptr;
+			continue;
+		}
+		if(ret != LUA_YIELD){
+			lua_traceback("lua_resume", coroutine, ret);
+			coroutine = nullptr;
+		}
+	}
 	if(session_info->session_state & SESSION_STATE_CLOSE){	
+		//printf("close tcp stream\n");
 		clear_http_sess_ctx(ctx);
 		*param = NULL;
 	}
-	return rec;
+	return ret;
 }
 
 int NEW_HTTP_SERVICE_INIT(void)
@@ -254,7 +454,7 @@ int NEW_HTTP_SERVICE_INIT(void)
 		printf("%s init : get log handle error!\n", HTTP_SERVICE_PLUGNAME);
 		return -1;
 	} 
-	// get thread num
+
 	// get all business lua script which register http
 	const char *conflist_path = "./plug/lua/conflist_lua.inf";
 	if(g_lua_plugs[LUA_ENTRY_TYPE_HTTP].size() == 0){
@@ -265,6 +465,9 @@ int NEW_HTTP_SERVICE_INIT(void)
 
 void NEW_HTTP_SERVICE_DESTROY(void)
 {
+	for(auto plug : g_lua_plugs[LUA_ENTRY_TYPE_HTTP]){
+		lua_close(plug.lua_state);
+	}
     return ;
 }
 

@@ -48,8 +48,25 @@ std::string trans_to_binary(unsigned int n){
 	return res;
 }
 
+std::string _inet_ntoa(uint32_t ip)
+{
+	 const char *_ip = inet_ntoa(*(struct in_addr *)&ip);
+	 return std::string(_ip);
+}
+
+
+static int get_stream_tuple4(struct streaminfo *a_tcp){
+	struct stream_tuple4_v4 *tuple4_v4 = a_tcp->addr.tuple4_v4;
+	printf("saddr: %s\n", _inet_ntoa(tuple4_v4->saddr).c_str());
+	printf("daddr: %s\n", _inet_ntoa(tuple4_v4->daddr).c_str());
+	printf("source: %d\n", ntohs(tuple4_v4->source));
+	printf("dest: %d\n", ntohs(tuple4_v4->dest));
+	return 0;
+}
+
 uchar HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thread_seq, struct streaminfo *a_tcp, void *a_packet)
 {	
+	//get_stream_tuple4(a_tcp);     
 	uchar			rec 			= PROT_STATE_GIVEME;
 	service_pmeinfo *service_pme 	= (service_pmeinfo*)*param;	
 	http_infor 		*a_http 		= (http_infor *)(session_info->app_info);
@@ -74,8 +91,17 @@ uchar HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thread_s
 		*param = service_pme;
 	}	
 	std::string prot_flag_str = trans_to_binary(session_info->prot_flag);
+	uchar curdir = a_http->curdir;
+	printf("curdir is %d, http_state is %d\n", curdir, http_state);
+	/*
 	MESA_handle_runtime_log(g_log_handle, RLOG_LV_INFO, HTTP_SERVICE_PLUGNAME, 
 			"call http_service entry, http_state is %02x\n, prot_flag mask is %s : %d", http_state, prot_flag_str.c_str(), prot_flag_str.length() - 1);
+
+	if(curdir == DIR_C2S){
+		int i = 0;
+		printf("data begin: curdir is %d, http_state is %d, prot_flag mask is %d\n", curdir, http_state, prot_flag_str.length() - 1);
+	}
+	*/
 	switch(session_info->prot_flag)
 	{
 		case HTTP_STATE: 

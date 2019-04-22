@@ -1,8 +1,11 @@
 
+function printf(s,...)
+    io.write(s:format(...))
+end
 
-printf = function(s,...)
-            return io.write(s:format(...))
-         end
+format_write = function(file, s, ...)
+                    return  file:write(s:format(...))
+                end
 
 function test(id)
     i = 0
@@ -47,8 +50,14 @@ function main()
 end
 
 function lua_call_c()
-    
-    printf("lua:  call lua_call_c\n")
-    myfoo()
-    printf("lua:  after my_foo\n")
+    ---printf("lua:  call lua_call_c\n")
+    t = {"aa", "bb", "cc"}
+    file = io.open("./output.txt", "a+")
+    format_write(file, "%s: %d", "age", 12)
+    ret = myfoo(t)
+    for k, v in pairs(ret["name"]) do
+        print(k, v)
+    end
+    ---printf("lua:  after my_foo\n")
 end
+
