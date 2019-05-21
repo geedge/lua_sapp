@@ -1,4 +1,5 @@
 
+---结果输出到文件中: ./log/lua_sapp/http_adapter/lua/http_response.log
 function printf(s,...)
     io.write(s:format(...))
     io.flush()
@@ -28,60 +29,29 @@ function print_header(header)
 end
 
 function process()
-    printf("\nprint stream: \n")
-    stream_info = get_stream_info()
-    for k, v in pairs(stream_info) do
-        printf("%s: %s\n", k, v)
-    end
-
-    printf("\nprint header:\n")
-    local regions = {"ALL"}
-    header = get_http_request_header(regions)
-    for k, v in pairs(header) do
-        printf("%s: %s\n", k, v)
-    end 
-
-    printf("\nprint body: \n")
-    while true do 
-        body = get_http_request_body()
-        for k, v in pairs(body) do 
-            printf("%s: %s\n", k, v)
-        end
-        if body['data_end'] == true then
-            break
-        end
-    end
-
-    --[[
-    file = io.open("./log/lua/http_request.log", "a+")
+    file = io.open("./log/lua_sapp/http_adapter/lua/http_response.log", "a+")
     format_write_file(file, "lua: call process\n")
-
     format_write_file(file, "\nprint stream info: \n")
     stream_info = get_stream_info()
     for k, v in pairs(stream_info) do
         format_write_file(file, "%s:  %s\n", k, v)
     end
 
-    format_write_file(file, "\nprint request headers: \n")
-    local req_regions = {"HTTP_HOST", "HTTP_REQ_LINE", "HTTP_OTHER_REGIONS"}
-    req_header = get_http_request_header(req_regions)
-    print_header(req_header)
-    
+    local resp_regions = {"HTTP_SERVER", "HTTP_RES_LINE", "HTTP_OTHER_REGIONS"}
+    format_write_file(file, "\nprint response headers: \n")
+    resp_header = get_http_response_header(resp_regions) 
+    print_header(resp_header)
 
-    format_write_file(file, "\nprint request body: \n")
+    format_write_file(file, "\nprint response body: \n")
     while true do 
-        body = get_http_request_body()
+        body = get_http_response_body()
         for k, v in pairs(body) do
             format_write_file(file, "%s:  %s\n", k, v)
         end
         if body['data_end'] == true then
-            format_write_file(file, "request body end\n")
+            format_write_file(file, "response body end\n")
             break
         end
-        format_write_file(file, "\n");
     end
     format_write_file(file, "\nlua: process end\n")
-    io.close(file)
-    ]]
-
 end

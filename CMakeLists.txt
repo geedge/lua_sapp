@@ -17,4 +17,4 @@ if (CMAKE_BUILD_TYPE STREQUAL Debug)
 endif()
 
 add_subdirectory(vendor)
-add_subdirectory(test)
+add_subdirectory(adapter)

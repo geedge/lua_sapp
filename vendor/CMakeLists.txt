@@ -4,9 +4,9 @@ include(ExternalProject)
 ExternalProject_Add(lua
         PREFIX lua
         URL ${CMAKE_CURRENT_SOURCE_DIR}/lua-5.3.5.tar.gz
-        URL_MD5 184779090118aebdf125fdb1233335ea
+        URL_MD5 4f4b4f323fd3514a68e0ab3da8ce3455
         CONFIGURE_COMMAND cd ./src 
-        BUILD_COMMAND make linux
+        BUILD_COMMAND make linux MYCFLAGS="-fPIC"
         INSTALL_COMMAND make install INSTALL_TOP=<INSTALL_DIR>
         BUILD_IN_SOURCE 1)
 

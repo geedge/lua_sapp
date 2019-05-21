@@ -1,0 +1,9 @@
+[PLUGINFO]
+PLUGNAME = http_adapter
+SO_PATH = ./plug/business/http_adapter/libhttp_adapter.so
+INIT_FUNC = http_adapter_init
+DESTROY_FUNC = http_adapter_destroy
+
+[HTTP]
+FUNC_FLAG = ALL
+FUNC_NAME = http_adapter_http_entry

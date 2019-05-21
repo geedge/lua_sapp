@@ -6,20 +6,20 @@
 //压栈之前要check_stack  done
 //流结束clear_ctx之外还要释放该协程，自动垃圾回收？做实验验证一下  done 
 //destroy，释放lua_state  done
-//多线程 m * n个虚拟机
-//dumpfile改成在线试一下
+//多线程 m * n个虚拟机(m是线程数量，n是lua插件数量) done 
 //错误处理，日志, 工程化，日志完备
 
 static void* g_logger = NULL;
 static std::vector<std::vector<lua_State*>> g_http_lua_states;
+extern int g_iThreadNum;
 
 static void lua_traceback(const char *func_name, lua_State *lua_state, int ret){
 	int n = lua_gettop(lua_state);
-	printf("%s error: ret is %d, traceback is:\n", func_name, ret);
+	MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "%s error: ret is %d, traceback is: ", func_name, ret);
 	for(int i = -1; i >= 0 - n; i--){
         std::string type = std::string(lua_typename(lua_state, lua_type(lua_state, i)));
         if(type == "string"){
-			printf("%s\n", lua_tostring(lua_state, i));
+			MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "%s", lua_tostring(lua_state, i));
 		}
     }
 	lua_pop(lua_state, n);
@@ -56,8 +56,7 @@ static int get_stream_tuple5(lua_State *lua_state){
     http_sess_ctx *sess_ctx = (http_sess_ctx *)lua_touserdata(lua_state, -1);
 	lua_pop(lua_state, 1);
 	if(sess_ctx == NULL){
-		//do log
-		std::cout<<"sess_ctx is null"<<std::endl; 
+		MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "sess_ctx is null");
 		return -1;
 	}
 	stream_tuple5& tuple5 = sess_ctx->tuple5;
@@ -95,7 +94,7 @@ static int _get_stream_info(lua_State *lua_state, int status, lua_KContext yield
 }
 
 static int get_stream_info(lua_State* lua_state){
-	//printf("call get_strem_info\n");
+	MESA_handle_runtime_log(g_logger, RLOG_LV_DEBUG, LOG_MODULE_NAME, "call get_strem_info");
 	return _get_stream_info(lua_state, 0, 0);
 }
 
@@ -104,8 +103,7 @@ static int get_http_header(lua_State *lua_state, int type){
     http_sess_ctx *sess_ctx = (http_sess_ctx *)lua_touserdata(lua_state, -1);
 	lua_pop(lua_state, 1);
 	if(sess_ctx == NULL){
-		//do log
-		std::cout<<"sess_ctx is null"<<std::endl; 
+		MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "sess_ctx is null");
 		return -1;
 	}
 	std::unordered_set<std::string> required_regions; 
@@ -116,7 +114,7 @@ static int get_http_header(lua_State *lua_state, int type){
 	}
 	http_header& header = (type == HTTP_TYPE_REQUEST ? sess_ctx->req_header : sess_ctx->resp_header);
 	if(header.parse_done == true){
-		//printf("header parse done\n");
+		MESA_handle_runtime_log(g_logger, RLOG_LV_DEBUG, LOG_MODULE_NAME, "header parse done");
 		lua_newtable(lua_state);
 		for(auto region : header.std_regions){
 			if(required_regions.find("ALL") != required_regions.end() || required_regions.find(region.first) != required_regions.end()){
@@ -143,7 +141,7 @@ static int get_http_header(lua_State *lua_state, int type){
 }
 
 static int _get_http_request_header(lua_State *lua_state, int status, lua_KContext yieldk_ctx){
-	//printf("call get_http_request_header\n");
+	MESA_handle_runtime_log(g_logger, RLOG_LV_DEBUG, LOG_MODULE_NAME, "call get_http_request_header");
 	int ret = get_http_header(lua_state, HTTP_TYPE_REQUEST);
 	if(ret < 0){
 		lua_yieldk(lua_state, 0, 0, _get_http_request_header);
@@ -168,13 +166,12 @@ static int get_http_response_header(lua_State* lua_state){
 }
 
 static int get_http_body(lua_State *lua_state, int type){
-	//printf("call _get_http_response_body\n");
+	MESA_handle_runtime_log(g_logger, RLOG_LV_DEBUG, LOG_MODULE_NAME, "call _get_http_response_body");
 	lua_getglobal(lua_state, "cur_http_sess_ctx");
     http_sess_ctx *sess_ctx = (http_sess_ctx *)lua_touserdata(lua_state, -1);
 	lua_pop(lua_state, 1);
 	if(sess_ctx == NULL){
-		//do log
-		std::cout<<"sess_ctx is null"<<std::endl; 
+		MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "sess_ctx is null");
 		return -1;
 	}
 	http_body& body = (type ==  HTTP_TYPE_REQUEST? sess_ctx->req_body : sess_ctx->resp_body);
@@ -230,20 +227,19 @@ static int load_lua_http_plug(const char *profile, int thread_num){
 	char entry_type[LUA_SAPP_SYMBOL_MAX] = "";
 	MESA_load_profile_string_def(profile, section, "file_path", file_path, sizeof(file_path), "");
 	MESA_load_profile_string_def(profile, section, "entry_type", entry_type, sizeof(entry_type), "");
-	printf("MESA_prof_load: profile is %s, section is %s, file_path is %s, entry_type is %s\n",
-				 profile, section, file_path, entry_type);
+	MESA_handle_runtime_log(g_logger, RLOG_LV_INFO, LOG_MODULE_NAME, "MESA_prof_load: profile is %s, section is %s,"
+						"file_path is %s, entry_type is %s\n", profile, section, file_path, entry_type);
 	if(strncmp(entry_type, "http", LUA_SAPP_SYMBOL_MAX) == 0){
 		for(int i = 0; i < thread_num; i++){
 			lua_State *lua_state = luaL_newstate();
 			if(lua_state == NULL){
-				printf("failed to LuaL_newstate\n");
+				MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "failed to LuaL_newstate");
 				return -1;
 			}
 			luaL_openlibs(lua_state);
 			int ret = luaL_dofile(lua_state, file_path);
 			if(ret){
-				//log error
-				printf("error: ret is %d, file_path is %s\n", ret, file_path);
+				MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "error: ret is %d, file_path is %s\n", ret, file_path);
 				return -1;
 			}
 			lua_register(lua_state, "get_stream_info", get_stream_info);
@@ -278,7 +274,7 @@ static int process_lua_plug_conflist(const char* filename, int thread_num)
 		lua_plug_conf_path[len - 1] = '\0';
 		int ret = load_lua_http_plug(lua_plug_conf_path, thread_num);
 		if(ret < 0){
-			printf("failed to load_lua_plug: conf_path is %s\n", lua_plug_conf_path);
+			MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "failed to load_lua_plug: conf_path is %s\n", lua_plug_conf_path);
 		}
 	}
 	fclose(fp);
@@ -292,8 +288,7 @@ static http_sess_ctx* init_http_sess_ctx(int thread_seq){
 		lua_State* coroutine = lua_newthread(lua_state);
 		int ret = lua_checkstack(lua_state, 1);
         if(ret != 1){
-			//do log
-            printf("do not have enough space, ret is %d\n", ret);
+			MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "do not have enough space, ret is %d\n", ret);
 			continue;
 		}
 		ctx->coroutines.push_back(coroutine);
@@ -313,8 +308,7 @@ std::string utils_inet_ntoa(uint32_t ip)
 	 return std::string(_ip);
 }
 
-uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thread_seq, struct streaminfo *a_tcp, void *a_packet){	
-	//printf("thread_seq is %d\n", thread_seq);
+extern "C" uchar http_adapter_http_entry(stSessionInfo* session_info, void **param, int thread_seq, struct streaminfo *a_tcp, void *a_packet){	
 	uchar ret = PROT_STATE_GIVEME;
 	http_sess_ctx *ctx = (http_sess_ctx*)*param;	
 	http_infor *a_http = (http_infor *)(session_info->app_info);
@@ -382,7 +376,6 @@ uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thre
 			break;			
 	}
     uchar http_state = a_http->http_state;
-	//printf("curdir is %d, http_state is %d\n", curdir, http_state);
     //header over
 	if(http_state == HTTP_DATA_BEGIN){
 		if(curdir == DIR_C2S){
@@ -410,7 +403,7 @@ uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thre
 		int ret = lua_checkstack(coroutine, 1);
         if(ret != 1){
 			//do log
-            printf("do not have enough space, ret is %d\n", ret);
+			MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "do not have enough space, ret is %d", ret);
 			continue;
 		}
 		*/
@@ -430,26 +423,20 @@ uchar NEW_HTTP_SERVICE_ENTRY(stSessionInfo* session_info, void **param, int thre
 		}
 	}
 	if(session_info->session_state & SESSION_STATE_CLOSE){	
-		//printf("close tcp stream\n");
+		MESA_handle_runtime_log(g_logger, RLOG_LV_INFO, LOG_MODULE_NAME, "close tcp stream");
 		clear_http_sess_ctx(ctx);
 		*param = NULL;
 	}
 	return ret;
 }
 
-int NEW_HTTP_SERVICE_INIT(void){
-	/*
-	g_logger = MESA_create_runtime_log_handle("./log/http/http_service", 10);
+extern "C" int http_adapter_init(void){
+	g_logger = MESA_create_runtime_log_handle("./log/lua_sapp/http_adapter/http_adapter.log", 10);
 	if(g_logger == NULL){		
-		printf("%s init : get log handle error!\n", HTTP_SERVICE_PLUGNAME);
+		MESA_handle_runtime_log(g_logger, RLOG_LV_FATAL, LOG_MODULE_NAME, "%s init : get log handle error!", HTTP_SERVICE_PLUGNAME);
 		return -1;
 	} 
-	*/
-	int thread_num = 1;
-	const char *profile = "./conf/main.conf";
-	const char *section = "Module";
-	MESA_load_profile_int_def(profile, section, "threadnum", (int*)&thread_num, 0);
-	printf("MESA_prof_load: profile is %s, section is %s, thread_num is %d\n", profile, section, thread_num);	
+	int thread_num = g_iThreadNum;;
 	for(int i = 0; i < thread_num; i++){
 		g_http_lua_states.push_back(std::vector<lua_State*>());
 	}
@@ -460,7 +447,7 @@ int NEW_HTTP_SERVICE_INIT(void){
 	return 0;
 }
 
-void NEW_HTTP_SERVICE_DESTROY(void){
+extern "C" void http_adapter_destroy(void){
 	for(auto states : g_http_lua_states){
 		for(auto state : states){
 			lua_close(state);

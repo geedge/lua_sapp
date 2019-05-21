@@ -1,0 +1,3 @@
+[main]
+file_path = ./plug/lua/http_response/http_response.lua
+entry_type = http
